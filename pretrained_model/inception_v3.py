@@ -28,6 +28,7 @@ from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import nn_ops
 from tensorflow.python.ops import variable_scope
+from tensorflow.python.ops import nn
 
 trunc_normal = lambda stddev: init_ops.truncated_normal_initializer(0.0, stddev)
 
@@ -633,14 +634,12 @@ def inception_v3(inputs,
             features = layers.conv2d(
                 net,
                 out_feature_size, [1, 1],
-                activation_fn=None,
-                normalizer_fn=None,
                 scope='Conv2d_1c_1x1')
             end_points['features'] = features
 
-            features = layers_lib.dropout(
-                features, keep_prob=dropout_keep_prob, scope='Dropout_2b')
-            end_points['PreLogits2'] = features
+            # features = layers_lib.dropout(
+            #     features, keep_prob=dropout_keep_prob, scope='Dropout_2b')
+            # end_points['PreLogits2'] = features
 
             # out_feature_size
             logits = layers.conv2d(
