@@ -52,11 +52,13 @@ import os
 
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
+import tensorflow.contrib.slim.python.slim.nets as nets
 import pretrained_model.inception_v3 as icp
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--train_dir', default='coco-animals/train')
+parser.add_argument('--log_dir', default='log/inception')
 parser.add_argument('--val_dir', default='coco-animals/val')
 parser.add_argument('--model_path', default='vgg_16.ckpt', type=str)
 parser.add_argument('--batch_size', default=32, type=int)
@@ -148,7 +150,7 @@ def main(args):
             image_decoded = tf.image.decode_jpeg(image_string, channels=3)          # (1)
             image = tf.cast(image_decoded, tf.float32)
 
-            smallest_side = 256.0
+            smallest_side = 326.0
             height, width = tf.shape(image)[0], tf.shape(image)[1]
             height = tf.to_float(height)
             width = tf.to_float(width)
@@ -168,11 +170,12 @@ def main(args):
         # (5) Substract the per color mean `VGG_MEAN`
         # Note: we don't normalize the data here, as VGG was trained without normalization
         def training_preprocess(image, label):
-            crop_image = tf.random_crop(image, [224, 224, 3])                       # (3)
+            crop_image = tf.random_crop(image, [299, 299, 3])                       # (3)
             flip_image = tf.image.random_flip_left_right(crop_image)                # (4)
 
             means = tf.reshape(tf.constant(VGG_MEAN), [1, 1, 3])
             centered_image = flip_image - means                                     # (5)
+            centered_image = centered_image / 255
 
             return centered_image, label
 
@@ -181,7 +184,7 @@ def main(args):
         # (4) Substract the per color mean `VGG_MEAN`
         # Note: we don't normalize the data here, as VGG was trained without normalization
         def val_preprocess(image, label):
-            crop_image = tf.image.resize_image_with_crop_or_pad(image, 224, 224)    # (3)
+            crop_image = tf.image.resize_image_with_crop_or_pad(image, 299, 299)    # (3)
 
             means = tf.reshape(tf.constant(VGG_MEAN), [1, 1, 3])
             centered_image = crop_image - means                                     # (4)
@@ -203,16 +206,16 @@ def main(args):
         train_dataset = tf.data.Dataset.from_tensor_slices((train_filenames, train_labels))
         train_dataset = train_dataset.map(_parse_function, num_parallel_calls=args.num_workers)
         train_dataset = train_dataset.map(training_preprocess, num_parallel_calls=args.num_workers)
-        train_dataset = train_dataset.shuffle(buffer_size=10000)  # don't forget to shuffle
+        train_dataset = train_dataset.shuffle(buffer_size=10*args.batch_size*args.num_workers)  # don't forget to shuffle
         batched_train_dataset = train_dataset.batch(args.batch_size)
-        batched_train_dataset = batched_train_dataset.prefetch(args.batch_size)
+        # batched_train_dataset = batched_train_dataset.prefetch(args.batch_size)
 
         # Validation dataset
         val_dataset = tf.data.Dataset.from_tensor_slices((val_filenames, val_labels))
         val_dataset = val_dataset.map(_parse_function, num_parallel_calls=args.num_workers)
         val_dataset = val_dataset.map(val_preprocess, num_parallel_calls=args.num_workers)
         batched_val_dataset = val_dataset.batch(args.batch_size)
-        batched_val_dataset = batched_val_dataset.prefetch(args.batch_size)
+        # batched_val_dataset = batched_val_dataset.prefetch(args.batch_size)
 
 
         # Now we define an iterator that can operator on either dataset.
@@ -248,9 +251,15 @@ def main(args):
         # Each model has a different architecture, so "vgg_16/fc8" will change in another model.
         # Here, logits gives us directly the predicted scores we wanted from the images.
         # We pass a scope to initialize "vgg_16/fc8" weights with he_initializer
+
         with slim.arg_scope(icp.inception_v3_arg_scope(weight_decay=args.weight_decay)):
             logits, _ = icp.inception_v3(images, num_classes=num_classes, is_training=is_training,
                                    dropout_keep_prob=args.dropout_keep_prob, out_feature_size=args.out_fea)
+
+        # icp = nets.inception_v3
+        # with slim.arg_scope(icp.i(weight_decay=args.weight_decay)):
+        #     logits, _ = icp.vgg_16(images, num_classes=num_classes, is_training=is_training,
+        #                            dropout_keep_prob=args.dropout_keep_prob)
 
         # Specify where the model checkpoint is (pretrained weights).
         model_path = args.model_path
@@ -267,7 +276,7 @@ def main(args):
         # `get_variables` will only return the variables whose name starts with the given pattern
         # final_conv_variables = tf.contrib.framework.get_variables('final_conv')
         final_conv_variables = slim.get_variables('InceptionV3/Logits/final_conv')
-        # print(final_conv_variables) # print the variables of final conv
+        print(final_conv_variables) # print the variables of final conv
         final_conv_init = tf.variables_initializer(final_conv_variables)
 
         # ---------------------------------------------------------------------
@@ -275,6 +284,10 @@ def main(args):
         # We can then call the total loss easily
         tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
         loss = tf.losses.get_total_loss()
+        tf.summary.scalar('loss', loss)
+
+        # summaries合并
+        merged = tf.summary.merge_all()
 
         # First we want to train only the reinitialized last layer fc8 for a few epochs.
         # We run minimize the loss only with respect to the fc8 variables (weight and bias).
@@ -301,21 +314,28 @@ def main(args):
         init_fn(sess)  # load the pretrained weights
         sess.run(final_conv_init)  # initialize the new fc8 layer
 
+        train_writer = tf.summary.FileWriter(args.log_dir + '/train', sess.graph)
+        test_writer = tf.summary.FileWriter(args.log_dir + '/test')
+
         # Update only the last layer for a few epochs.
+        max_step = 0
         for epoch in range(args.num_epochs1):
             # Run an epoch over the training data.
-            print('Starting epoch %d / %d' % (epoch + 1, args.num_epochs1))
+            print('######### Starting epoch %d / %d' % (epoch + 1, args.num_epochs1))
             # Here we initialize the iterator with the training set.
             # This means that we can go through an entire epoch until the iterator becomes empty.
             sess.run(train_init_op)
+
             step = 0
             while True:
                 try:
-                    _, lss = sess.run([part_train_op, loss], {is_training: True})
+                    _, lss, summary = sess.run([part_train_op, loss, merged], {is_training: True})
                     step += 1
+                    train_writer.add_summary(summary, step+epoch*max_step)
                     if step % 10 == 0:
                         print('%d is finished. loss = %.6f' % (step, lss))
                 except tf.errors.OutOfRangeError:
+                    max_step = max(max_step, step)
                     break
 
             # Check accuracy on the train and val sets every epoch.
@@ -323,11 +343,12 @@ def main(args):
             val_acc = check_accuracy(sess, correct_prediction, is_training, val_init_op)
             print('Train accuracy: %f' % train_acc)
             print('Val accuracy: %f\n' % val_acc)
+        train_writer.close()
 
 
         # Train the entire model for a few more epochs, continuing with the *same* weights.
         for epoch in range(args.num_epochs2):
-            print('Starting epoch %d / %d' % (epoch + 1, args.num_epochs2))
+            print('######　Starting epoch %d / %d' % (epoch + 1, args.num_epochs2))
             sess.run(train_init_op)
             while True:
                 try:
