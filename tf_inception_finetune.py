@@ -60,6 +60,7 @@ parser.add_argument('--train_dir', default='coco-animals/train')
 parser.add_argument('--val_dir', default='coco-animals/val')
 parser.add_argument('--model_path', default='vgg_16.ckpt', type=str)
 parser.add_argument('--batch_size', default=32, type=int)
+parser.add_argument('--out_fea', default=512, type=int, )
 parser.add_argument('--num_workers', default=4, type=int)
 parser.add_argument('--num_epochs1', default=10, type=int)
 parser.add_argument('--num_epochs2', default=10, type=int)
@@ -249,7 +250,7 @@ def main(args):
         # We pass a scope to initialize "vgg_16/fc8" weights with he_initializer
         with slim.arg_scope(icp.inception_v3_arg_scope(weight_decay=args.weight_decay)):
             logits, _ = icp.inception_v3(images, num_classes=num_classes, is_training=is_training,
-                                   dropout_keep_prob=args.dropout_keep_prob)
+                                   dropout_keep_prob=args.dropout_keep_prob, out_feature_size=args.out_fea)
 
         # Specify where the model checkpoint is (pretrained weights).
         model_path = args.model_path
@@ -259,14 +260,14 @@ def main(args):
         # Calling function `init_fn(sess)` will load all the pretrained weights.
         variables_to_restore = tf.contrib.framework.get_variables_to_restore(
             exclude=['InceptionV3/Logits/final_conv'])
-        print(variables_to_restore)
+        # print(variables_to_restore) # print the variables to restore
         init_fn = tf.contrib.framework.assign_from_checkpoint_fn(model_path, variables_to_restore)
 
         # Initialization operation from scratch for the new "fc8" layers
         # `get_variables` will only return the variables whose name starts with the given pattern
         # final_conv_variables = tf.contrib.framework.get_variables('final_conv')
         final_conv_variables = slim.get_variables('InceptionV3/Logits/final_conv')
-        print(final_conv_variables)
+        # print(final_conv_variables) # print the variables of final conv
         final_conv_init = tf.variables_initializer(final_conv_variables)
 
         # ---------------------------------------------------------------------

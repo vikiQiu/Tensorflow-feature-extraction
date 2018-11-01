@@ -637,6 +637,11 @@ def inception_v3(inputs,
                 normalizer_fn=None,
                 scope='Conv2d_1c_1x1')
             end_points['features'] = features
+
+            features = layers_lib.dropout(
+                features, keep_prob=dropout_keep_prob, scope='Dropout_2b')
+            end_points['PreLogits2'] = features
+
             # out_feature_size
             logits = layers.conv2d(
                 features,
