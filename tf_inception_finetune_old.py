@@ -54,8 +54,7 @@ import tensorflow as tf
 import tensorflow.contrib.slim as slim
 import tensorflow.contrib.slim.python.slim.nets.inception_v3 as icp_raw
 # import tensorflow.contrib.
-import pretrained_model.models_inception_v3 as icp
-from pretrained_model.models_inception_preprocessing import preprocess_for_train_label, preprocess_for_val_label
+import pretrained_model.inception_v3 as icp
 
 
 parser = argparse.ArgumentParser()
@@ -79,7 +78,6 @@ VGG_MEAN = [123.68, 116.78, 103.94]
 def list_images(directory):
     """
     Get all the images and labels in directory/label/*.jpg
-    label_to_id: in inception, label start from 1 to 1001
     """
     print('Listing images ... (%s)' % directory)
     labels = os.listdir(directory)
@@ -98,26 +96,48 @@ def list_images(directory):
 
     label_to_int = {}
     for i, label in enumerate(unique_labels):
-        label_to_int[label] = i+1 # in inception, label start from 1 to 1001
+        label_to_int[label] = i+1
 
     labels = [label_to_int[l] for l in labels]
 
     return filenames, labels
 
 
-def _load_image(filename, label):
-    '''
-    1. Read image by the filename
-    2. Convert it to tf.float32 and rescaled it into [0, 1]
-    :param filename:
-    :param label:
-    :return:
-    '''
-    image_string = tf.read_file(filename)
-    image_decoded = tf.image.decode_jpeg(image_string, channels=3)  # (1)
-    image = tf.cast(image_decoded, tf.float32)
-    image = image / 255
+def preprocess_for_eval(image, label, height=299, width=299,
+                        central_fraction=0.875, scope=None):
+  """Prepare one image for evaluation.
+  If height and width are specified it would output an image with that size by
+  applying resize_bilinear.
+  If central_fraction is specified it would crop the central fraction of the
+  input image.
+  Args:
+    image: 3-D Tensor of image. If dtype is tf.float32 then the range should be
+      [0, 1], otherwise it would converted to tf.float32 assuming that the range
+      is [0, MAX], where MAX is largest positive representable number for
+      int(8/16/32) data type (see `tf.image.convert_image_dtype` for details).
+    height: integer
+    width: integer
+    central_fraction: Optional Float, fraction of the image to crop.
+    scope: Optional scope for name_scope.
+  Returns:
+    3-D float Tensor of prepared image.
+  """
+  with tf.name_scope(scope, 'eval_image', [image, height, width]):
+    if image.dtype != tf.float32:
+      image = tf.image.convert_image_dtype(image, dtype=tf.float32)
+    # Crop the central region of the image with an area containing 87.5% of
+    # the original image.
+    if central_fraction:
+      image = tf.image.central_crop(image, central_fraction=central_fraction)
 
+    if height and width:
+      # Resize the image to the specified height and width.
+      image = tf.expand_dims(image, 0)
+      image = tf.image.resize_bilinear(image, [height, width],
+                                       align_corners=False)
+      image = tf.squeeze(image, [0])
+    image = tf.subtract(image, 0.5)
+    image = tf.multiply(image, 2.0)
     return image, label
 
 
@@ -167,6 +187,57 @@ def main(args):
         # https://github.com/tensorflow/models/blob/master/research/slim/preprocessing/vgg_preprocessing.py
         # Also see the VGG paper for more details: https://arxiv.org/pdf/1409.1556.pdf
 
+        # Preprocessing (for both training and validation):
+        # (1) Decode the image from jpg format
+        # (2) Resize the image so its smaller side is 256 pixels long
+        def _parse_function(filename, label):
+            image_string = tf.read_file(filename)
+            image_decoded = tf.image.decode_jpeg(image_string, channels=3)          # (1)
+            image = tf.cast(image_decoded, tf.float32)
+            image = image/255
+
+            # smallest_side = 326.0
+            # height, width = tf.shape(image)[0], tf.shape(image)[1]
+            # height = tf.to_float(height)
+            # width = tf.to_float(width)
+            #
+            # scale = tf.cond(tf.greater(height, width),
+            #                 lambda: smallest_side / width,
+            #                 lambda: smallest_side / height)
+            # new_height = tf.to_int32(height * scale)
+            # new_width = tf.to_int32(width * scale)
+            #
+            # resized_image = tf.image.resize_images(image, [new_height, new_width])  # (2)
+            # return resized_image, label
+            return image, label
+
+        # Preprocessing (for training)
+        # (3) Take a random 224x224 crop to the scaled image
+        # (4) Horizontally flip the image with probability 1/2
+        # (5) Substract the per color mean `VGG_MEAN`
+        # Note: we don't normalize the data here, as VGG was trained without normalization
+        def training_preprocess(image, label):
+            crop_image = tf.random_crop(image, [299, 299, 3])                       # (3)
+            flip_image = tf.image.random_flip_left_right(crop_image)                # (4)
+
+            # means = tf.reshape(tf.constant(VGG_MEAN), [1, 1, 3])
+            centered_image = flip_image #- means                                     # (5)
+            centered_image = centered_image #/ 256
+
+            return centered_image, label
+
+        # Preprocessing (for validation)
+        # (3) Take a central 224x224 crop to the scaled image
+        # (4) Substract the per color mean `VGG_MEAN`
+        # Note: we don't normalize the data here, as VGG was trained without normalization
+        def val_preprocess(image, label):
+            crop_image = tf.image.resize_image_with_crop_or_pad(image, 299, 299)    # (3)
+
+            means = tf.reshape(tf.constant(VGG_MEAN), [1, 1, 3])
+            centered_image = crop_image - means                                     # (4)
+
+            return centered_image, label
+
         # ----------------------------------------------------------------------
         # DATASET CREATION using tf.contrib.data.Dataset
         # https://github.com/tensorflow/tensorflow/tree/master/tensorflow/contrib/data
@@ -180,16 +251,16 @@ def main(args):
 
         # Training dataset
         train_dataset = tf.data.Dataset.from_tensor_slices((train_filenames, train_labels))
-        train_dataset = train_dataset.map(_load_image, num_parallel_calls=args.num_workers)
-        train_dataset = train_dataset.map(preprocess_for_train_label, num_parallel_calls=args.num_workers)
+        train_dataset = train_dataset.map(_parse_function, num_parallel_calls=args.num_workers)
+        train_dataset = train_dataset.map(training_preprocess, num_parallel_calls=args.num_workers)
         train_dataset = train_dataset.shuffle(buffer_size=10*args.batch_size*args.num_workers)  # don't forget to shuffle
         batched_train_dataset = train_dataset.batch(args.batch_size)
         # batched_train_dataset = batched_train_dataset.prefetch(args.batch_size)
 
         # Validation dataset
         val_dataset = tf.data.Dataset.from_tensor_slices((val_filenames, val_labels))
-        val_dataset = val_dataset.map(_load_image, num_parallel_calls=args.num_workers)
-        val_dataset = val_dataset.map(preprocess_for_val_label, num_parallel_calls=args.num_workers)
+        val_dataset = val_dataset.map(_parse_function, num_parallel_calls=args.num_workers)
+        val_dataset = val_dataset.map(val_preprocess, num_parallel_calls=args.num_workers)
         batched_val_dataset = val_dataset.batch(args.batch_size)
         # batched_val_dataset = batched_val_dataset.prefetch(args.batch_size)
 
@@ -230,7 +301,7 @@ def main(args):
 
         with slim.arg_scope(icp.inception_v3_arg_scope(weight_decay=args.weight_decay)):
             logits, end_points = icp.inception_v3(images, num_classes=num_classes, is_training=is_training,
-                                                  dropout_keep_prob=args.dropout_keep_prob, create_aux_logits=False)
+                                   dropout_keep_prob=args.dropout_keep_prob, out_feature_size=args.out_fea)
 
         # icp = nets.inception_v3
         # with slim.arg_scope(icp.i(weight_decay=args.weight_decay)):
@@ -244,14 +315,14 @@ def main(args):
         # Restore only the layers up to fc7 (included)
         # Calling function `init_fn(sess)` will load all the pretrained weights.
         variables_to_restore = tf.contrib.framework.get_variables_to_restore(
-            exclude=['InceptionV3/Logits/Conv2d_1c_1x1'])
+            exclude=['InceptionV3/Logits/final_conv'])
         # print(variables_to_restore) # print the variables to restore
         init_fn = tf.contrib.framework.assign_from_checkpoint_fn(model_path, variables_to_restore)
 
         # Initialization operation from scratch for the new "fc8" layers
         # `get_variables` will only return the variables whose name starts with the given pattern
         # final_conv_variables = tf.contrib.framework.get_variables('final_conv')
-        final_conv_variables = slim.get_variables('InceptionV3/Logits/Conv2d_1c_1x1')
+        final_conv_variables = slim.get_variables('InceptionV3/Logits/final_conv')
         print(final_conv_variables) # print the variables of final conv
         final_conv_init = tf.variables_initializer(final_conv_variables)
 
@@ -308,7 +379,7 @@ def main(args):
                     _, lss, summary, im, conv = sess.run([part_train_op, loss, merged, images, end_points['Mixed_7c']], {is_training: True})
                     step += 1
                     # print(im[0,:10, :10])
-                    # print(conv.shape)
+                    print(conv.shape)
                     train_writer.add_summary(summary, step+epoch*max_step)
                     if step % 10 == 0:
                         print('%d is finished. loss = %.6f' % (step, lss))
@@ -358,11 +429,59 @@ def test_raw_inception(args):
         # https://github.com/tensorflow/models/blob/master/research/slim/preprocessing/vgg_preprocessing.py
         # Also see the VGG paper for more details: https://arxiv.org/pdf/1409.1556.pdf
 
+        # Preprocessing (for both training and validation):
+        # (1) Decode the image from jpg format
+        # (2) Resize the image so its smaller side is 256 pixels long
+        def _parse_function(filename, label):
+            image_string = tf.read_file(filename)
+            image_decoded = tf.image.decode_jpeg(image_string, channels=3)          # (1)
+            image = tf.cast(image_decoded, tf.float32)
+            image = image / 255
+
+            # smallest_side = 326.0
+            # height, width = tf.shape(image)[0], tf.shape(image)[1]
+            # height = tf.to_float(height)
+            # width = tf.to_float(width)
+            #
+            # scale = tf.cond(tf.greater(height, width),
+            #                 lambda: smallest_side / width,
+            #                 lambda: smallest_side / height)
+            # new_height = tf.to_int32(height * scale)
+            # new_width = tf.to_int32(width * scale)
+            #
+            # resized_image = tf.image.resize_images(image, [new_height, new_width])  # (2)
+            # return resized_image, label
+            return image, label
+
+        # Preprocessing (for validation)
+        # (3) Take a central 224x224 crop to the scaled image
+        # (4) Substract the per color mean `VGG_MEAN`
+        # Note: we don't normalize the data here, as VGG was trained without normalization
+        def val_preprocess(image, label):
+            crop_image = tf.image.resize_image_with_crop_or_pad(image, 299, 299)    # (3)
+
+            # means = tf.reshape(tf.constant(VGG_MEAN), [1, 1, 3])
+            centered_image = crop_image #/ 256 # - means                                     # (4)
+
+            return centered_image, label
+
+        # ----------------------------------------------------------------------
+        # DATASET CREATION using tf.contrib.data.Dataset
+        # https://github.com/tensorflow/tensorflow/tree/master/tensorflow/contrib/data
+
+        # The tf.contrib.data.Dataset framework uses queues in the background to feed in
+        # data to the model.
+        # We initialize the dataset with a list of filenames and labels, and then apply
+        # the preprocessing functions described above.
+        # Behind the scenes, queues will load the filenames, preprocess them with multiple
+        # threads and apply the preprocessing in parallel, and then batch the data
+
         # Validation dataset
         val_dataset = tf.data.Dataset.from_tensor_slices((val_filenames, val_labels))
-        val_dataset = val_dataset.map(_load_image, num_parallel_calls=args.num_workers) # map (image, label) to (image, label)
-        val_dataset = val_dataset.map(preprocess_for_val_label, num_parallel_calls=args.num_workers)
+        val_dataset = val_dataset.map(_parse_function, num_parallel_calls=args.num_workers)
+        val_dataset = val_dataset.map(preprocess_for_eval, num_parallel_calls=args.num_workers)
         batched_val_dataset = val_dataset.batch(args.batch_size)
+        # batched_val_dataset = batched_val_dataset.prefetch(args.batch_size)
 
 
         # Now we define an iterator that can operator on either dataset.
@@ -398,10 +517,19 @@ def test_raw_inception(args):
         # Here, logits gives us directly the predicted scores we wanted from the images.
         # We pass a scope to initialize "vgg_16/fc8" weights with he_initializer
 
+        # with slim.arg_scope(icp.inception_v3_arg_scope(weight_decay=args.weight_decay)):
+        #     logits, end_points = icp.inception_v3(images, num_classes=num_classes, is_training=is_training,
+        #                            dropout_keep_prob=args.dropout_keep_prob, out_feature_size=args.out_fea)
+
+        # vgg = icp_raw.inception_v3(images)
         with slim.arg_scope(icp.inception_v3_arg_scope()):
-            logits, end_points = icp.inception_v3(images, is_training=is_training, num_classes=num_classes+1,
-                                                  dropout_keep_prob=args.dropout_keep_prob, reuse=tf.AUTO_REUSE,
-                                                  create_aux_logits=False)
+            logits, end_points = icp.inception_v3_raw(images, is_training=is_training, num_classes=1001,
+                                             dropout_keep_prob=args.dropout_keep_prob, reuse=tf.AUTO_REUSE)
+
+        # icp = nets.inception_v3
+        # with slim.arg_scope(icp.i(weight_decay=args.weight_decay)):
+        #     logits, _ = icp.vgg_16(images, num_classes=num_classes, is_training=is_training,
+        #                            dropout_keep_prob=args.dropout_keep_prob)
 
         # Specify where the model checkpoint is (pretrained weights).
         model_path = args.model_path
@@ -409,10 +537,18 @@ def test_raw_inception(args):
 
         # Restore only the layers up to fc7 (included)
         # Calling function `init_fn(sess)` will load all the pretrained weights.
-        variables_to_restore = tf.contrib.framework.get_variables_to_restore(exclude=[])
+        variables_to_restore = tf.contrib.framework.get_variables_to_restore(
+            exclude=[])
         print(variables_to_restore)
         # print(variables_to_restore) # print the variables to restore
         init_fn = tf.contrib.framework.assign_from_checkpoint_fn(model_path, variables_to_restore)
+
+        # Initialization operation from scratch for the new "fc8" layers
+        # `get_variables` will only return the variables whose name starts with the given pattern
+        # final_conv_variables = tf.contrib.framework.get_variables('final_conv')
+        # final_conv_variables = slim.get_variables('InceptionV3/Logits/final_conv')
+        # print(final_conv_variables) # print the variables of final conv
+        # final_conv_init = tf.variables_initializer(final_conv_variables)
 
         # ---------------------------------------------------------------------
         # Using tf.losses, any loss is added to the tf.GraphKeys.LOSSES collection
@@ -420,6 +556,19 @@ def test_raw_inception(args):
         tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
         loss = tf.losses.get_total_loss()
         tf.summary.scalar('loss', loss)
+
+        # summaries合并
+        merged = tf.summary.merge_all()
+
+        # First we want to train only the reinitialized last layer fc8 for a few epochs.
+        # We run minimize the loss only with respect to the fc8 variables (weight and bias).
+        # part_optimizer = tf.train.GradientDescentOptimizer(args.learning_rate1)
+        # part_train_op = part_optimizer.minimize(loss, var_list=final_conv_variables)
+        #
+        # # Then we want to finetune the entire model for a few epochs.
+        # # We run minimize the loss only with respect to all the variables.
+        # full_optimizer = tf.train.GradientDescentOptimizer(args.learning_rate2)
+        # full_train_op = full_optimizer.minimize(loss)
 
         # Evaluation metrics
         prediction = tf.to_int32(tf.argmax(logits, 1))
@@ -436,11 +585,61 @@ def test_raw_inception(args):
         init_fn(sess)  # load the pretrained weights
         # sess.run(final_conv_init)  # initialize the new fc8 layer
 
+        train_writer = tf.summary.FileWriter(args.log_dir + '/train', sess.graph)
+        test_writer = tf.summary.FileWriter(args.log_dir + '/test')
+
         val_acc = check_accuracy(sess, correct_prediction, is_training, val_init_op, prediction, labels, end_points)
         print('Val accuracy: %f\n' % val_acc)
+
+        # Update only the last layer for a few epochs.
+        # max_step = 0
+        # for epoch in range(args.num_epochs1):
+        #     # Run an epoch over the training data.
+        #     print('######### Starting epoch %d / %d' % (epoch + 1, args.num_epochs1))
+        #     # Here we initialize the iterator with the training set.
+        #     # This means that we can go through an entire epoch until the iterator becomes empty.
+        #     sess.run(train_init_op)
+        #
+        #     step = 0
+        #     while True:
+        #         try:
+        #             _, lss, summary, im, conv = sess.run([part_train_op, loss, merged, images, end_points['Mixed_7c']], {is_training: True})
+        #             step += 1
+        #             # print(im[0,:10, :10])
+        #             print(conv.shape)
+        #             train_writer.add_summary(summary, step+epoch*max_step)
+        #             if step % 10 == 0:
+        #                 print('%d is finished. loss = %.6f' % (step, lss))
+        #         except tf.errors.OutOfRangeError:
+        #             max_step = max(max_step, step)
+        #             break
+        #
+        #     # Check accuracy on the train and val sets every epoch.
+        #     train_acc = check_accuracy(sess, correct_prediction, is_training, train_init_op)
+        #     val_acc = check_accuracy(sess, correct_prediction, is_training, val_init_op)
+        #     print('Train accuracy: %f' % train_acc)
+        #     print('Val accuracy: %f\n' % val_acc)
+        # train_writer.close()
+
+
+        # Train the entire model for a few more epochs, continuing with the *same* weights.
+        # for epoch in range(args.num_epochs2):
+        #     print('######　Starting epoch %d / %d' % (epoch + 1, args.num_epochs2))
+        #     sess.run(train_init_op)
+        #     while True:
+        #         try:
+        #             _ = sess.run(full_train_op, {is_training: True})
+        #         except tf.errors.OutOfRangeError:
+        #             break
+        #
+        #     # Check accuracy on the train and val sets every epoch
+        #     train_acc = check_accuracy(sess, correct_prediction, is_training, train_init_op)
+        #     val_acc = check_accuracy(sess, correct_prediction, is_training, val_init_op)
+        #     print('Train accuracy: %f' % train_acc)
+        #     print('Val accuracy: %f\n' % val_acc)
 
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    main(args)
-    # test_raw_inception(args)
+    # main(args)
+    test_raw_inception(args)
