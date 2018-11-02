@@ -174,8 +174,8 @@ def main(args):
             flip_image = tf.image.random_flip_left_right(crop_image)                # (4)
 
             means = tf.reshape(tf.constant(VGG_MEAN), [1, 1, 3])
-            centered_image = flip_image - means                                     # (5)
-            centered_image = centered_image / 255
+            centered_image = flip_image #- means                                     # (5)
+            centered_image = centered_image / 256
 
             return centered_image, label
 
@@ -253,7 +253,7 @@ def main(args):
         # We pass a scope to initialize "vgg_16/fc8" weights with he_initializer
 
         with slim.arg_scope(icp.inception_v3_arg_scope(weight_decay=args.weight_decay)):
-            logits, _ = icp.inception_v3(images, num_classes=num_classes, is_training=is_training,
+            logits, end_points = icp.inception_v3(images, num_classes=num_classes, is_training=is_training,
                                    dropout_keep_prob=args.dropout_keep_prob, out_feature_size=args.out_fea)
 
         # icp = nets.inception_v3
@@ -329,8 +329,10 @@ def main(args):
             step = 0
             while True:
                 try:
-                    _, lss, summary = sess.run([part_train_op, loss, merged], {is_training: True})
+                    _, lss, summary, im, conv = sess.run([part_train_op, loss, merged, images, end_points['Mixed_7c']], {is_training: True})
                     step += 1
+                    # print(im[0,:10, :10])
+                    print(conv.shape)
                     train_writer.add_summary(summary, step+epoch*max_step)
                     if step % 10 == 0:
                         print('%d is finished. loss = %.6f' % (step, lss))
