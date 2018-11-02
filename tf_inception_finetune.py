@@ -230,7 +230,8 @@ def main(args):
 
         with slim.arg_scope(icp.inception_v3_arg_scope(weight_decay=args.weight_decay)):
             logits, end_points = icp.inception_v3(images, num_classes=num_classes, is_training=is_training,
-                                                  dropout_keep_prob=args.dropout_keep_prob, create_aux_logits=False)
+                                                  dropout_keep_prob=args.dropout_keep_prob, create_aux_logits=False,
+                                                  feature_dim=args.out_fea)
 
         # icp = nets.inception_v3
         # with slim.arg_scope(icp.i(weight_decay=args.weight_decay)):
@@ -244,14 +245,14 @@ def main(args):
         # Restore only the layers up to fc7 (included)
         # Calling function `init_fn(sess)` will load all the pretrained weights.
         variables_to_restore = tf.contrib.framework.get_variables_to_restore(
-            exclude=['InceptionV3/Logits/Conv2d_1c_1x1'])
+            exclude=['InceptionV3/Logits/final_conv'])
         # print(variables_to_restore) # print the variables to restore
         init_fn = tf.contrib.framework.assign_from_checkpoint_fn(model_path, variables_to_restore)
 
         # Initialization operation from scratch for the new "fc8" layers
         # `get_variables` will only return the variables whose name starts with the given pattern
         # final_conv_variables = tf.contrib.framework.get_variables('final_conv')
-        final_conv_variables = slim.get_variables('InceptionV3/Logits/Conv2d_1c_1x1')
+        final_conv_variables = slim.get_variables('InceptionV3/Logits/final_conv')
         print(final_conv_variables) # print the variables of final conv
         final_conv_init = tf.variables_initializer(final_conv_variables)
 
