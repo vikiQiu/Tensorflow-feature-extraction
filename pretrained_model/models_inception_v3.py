@@ -522,18 +522,18 @@ def inception_v3(inputs,
         net = slim.dropout(net, keep_prob=dropout_keep_prob, scope='Dropout_1b')
         end_points['PreLogits'] = net
 
-        with tf.variable_scope('final_conv'):
-            if feature_dim == 2048:
-                # 2048
-                logits = slim.conv2d(net, num_classes, [1, 1], activation_fn=None,
-                                     normalizer_fn=None, scope='Conv2d_1c_1x1_1')
-            else:
+        if feature_dim == 2048:
+            # 2048
+            logits = slim.conv2d(net, num_classes, [1, 1], activation_fn=None,
+                                 normalizer_fn=None, scope='Conv2d_1c_1x1')
+        else:
+            with tf.variable_scope('final_conv'):
                 # 2048
                 logits = slim.conv2d(net, feature_dim, [1, 1], activation_fn=None,
                                      normalizer_fn=None, scope='Conv2d_1c_1x1_1')
 
                 logits = slim.conv2d(logits, num_classes, [1, 1], activation_fn=None,
-                                     normalizer_fn=None, scope='Conv2d_1c_1x1_2')
+                                         normalizer_fn=None, scope='Conv2d_1c_1x1_2')
         if spatial_squeeze:
           logits = tf.squeeze(logits, [1, 2], name='SpatialSqueeze')
         # 1000

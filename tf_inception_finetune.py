@@ -49,6 +49,7 @@ coco-animals/
 
 import argparse
 import os
+import random
 
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
@@ -90,6 +91,7 @@ def list_images(directory):
     for label in labels:
         for f in os.listdir(os.path.join(directory, label)):
             files_and_labels.append((os.path.join(directory, label, f), label))
+    random.shuffle(files_and_labels)
 
     filenames, labels = zip(*files_and_labels)
     filenames = list(filenames)
@@ -184,7 +186,7 @@ def main(args):
         train_dataset = train_dataset.map(preprocess_for_train_label, num_parallel_calls=args.num_workers)
         train_dataset = train_dataset.shuffle(buffer_size=10*args.batch_size*args.num_workers)  # don't forget to shuffle
         batched_train_dataset = train_dataset.batch(args.batch_size)
-        # batched_train_dataset = batched_train_dataset.prefetch(args.batch_size)
+        batched_train_dataset = batched_train_dataset.prefetch(args.batch_size)
 
         # Validation dataset
         val_dataset = tf.data.Dataset.from_tensor_slices((val_filenames, val_labels))
@@ -229,7 +231,7 @@ def main(args):
         # We pass a scope to initialize "vgg_16/fc8" weights with he_initializer
 
         with slim.arg_scope(icp.inception_v3_arg_scope(weight_decay=args.weight_decay)):
-            logits, end_points = icp.inception_v3(images, num_classes=num_classes, is_training=is_training,
+            logits, end_points = icp.inception_v3(images, num_classes=num_classes+1, is_training=is_training,
                                                   dropout_keep_prob=args.dropout_keep_prob, create_aux_logits=False,
                                                   feature_dim=args.out_fea)
 
@@ -244,17 +246,17 @@ def main(args):
 
         # Restore only the layers up to fc7 (included)
         # Calling function `init_fn(sess)` will load all the pretrained weights.
-        variables_to_restore = tf.contrib.framework.get_variables_to_restore(
-            exclude=['InceptionV3/Logits/final_conv'])
+        variables_to_restore = tf.contrib.framework.get_variables_to_restore()
+            # exclude=['InceptionV3/Logits/final_conv'])
         # print(variables_to_restore) # print the variables to restore
         init_fn = tf.contrib.framework.assign_from_checkpoint_fn(model_path, variables_to_restore)
 
         # Initialization operation from scratch for the new "fc8" layers
         # `get_variables` will only return the variables whose name starts with the given pattern
         # final_conv_variables = tf.contrib.framework.get_variables('final_conv')
-        final_conv_variables = slim.get_variables('InceptionV3/Logits/final_conv')
+        final_conv_variables = slim.get_variables('InceptionV3/Logits/Conv2d_1c_1x1')
         print(final_conv_variables) # print the variables of final conv
-        final_conv_init = tf.variables_initializer(final_conv_variables)
+        # final_conv_init = tf.variables_initializer(final_conv_variables)
 
         # ---------------------------------------------------------------------
         # Using tf.losses, any loss is added to the tf.GraphKeys.LOSSES collection
@@ -287,9 +289,11 @@ def main(args):
     # Now that we have built the graph and finalized it, we define the session.
     # The session is the interface to *run* the computational graph.
     # We can call our training operations with `sess.run(train_op)` for instance
-    with tf.Session(graph=graph) as sess:
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    with tf.Session(graph=graph, config=config) as sess:
         init_fn(sess)  # load the pretrained weights
-        sess.run(final_conv_init)  # initialize the new fc8 layer
+        # sess.run(final_conv_init)  # initialize the new fc8 layer
 
         train_writer = tf.summary.FileWriter(args.log_dir + '/train', sess.graph)
         test_writer = tf.summary.FileWriter(args.log_dir + '/test')
@@ -306,13 +310,13 @@ def main(args):
             step = 0
             while True:
                 try:
-                    _, lss, summary, im, conv = sess.run([part_train_op, loss, merged, images, end_points['Mixed_7c']], {is_training: True})
+                    _, lss, summary, cpre = sess.run([part_train_op, loss, merged, correct_prediction], {is_training: True})
                     step += 1
                     # print(im[0,:10, :10])
                     # print(conv.shape)
                     train_writer.add_summary(summary, step+epoch*max_step)
                     if step % 10 == 0:
-                        print('%d is finished. loss = %.6f' % (step, lss))
+                        print('%d is finished. loss = %.6f; step accuracy = %.2f' % (step, lss, cpre.sum()/cpre.shape[0]))
                 except tf.errors.OutOfRangeError:
                     max_step = max(max_step, step)
                     break
