@@ -49,6 +49,7 @@ coco-animals/
 
 import argparse
 import os
+import time
 import random
 
 import tensorflow as tf
@@ -107,6 +108,12 @@ def list_images(directory):
     return filenames, labels
 
 
+def check_directories(dirs):
+    for d in dirs:
+        if not os.path.exists(d):
+            os.mkdir(d)
+
+
 def _load_image(filename, label):
     '''
     1. Read image by the filename
@@ -133,14 +140,13 @@ def check_accuracy(sess, correct_prediction, is_training, dataset_init_op, predi
     step = 0
     while True:
         try:
-            correct_pred, pre, l, logits = sess.run([correct_prediction, prediction, label, end_points['Logits']], {is_training: False})
+            # correct_pred, pre, l, logits = sess.run([correct_prediction, prediction, label, end_points['Logits']], {is_training: False})
+            correct_pred = sess.run([correct_prediction], {is_training: False})
             num_correct += correct_pred.sum()
             num_samples += correct_pred.shape[0]
             step += 1
             if step % 10 == 0:
                 print('step%d: accuracy = %.5f' % (step, float(num_correct) / num_samples))
-                print(pre, l)
-                print(logits.shape)
         except tf.errors.OutOfRangeError:
             break
 
@@ -246,17 +252,20 @@ def main(args):
 
         # Restore only the layers up to fc7 (included)
         # Calling function `init_fn(sess)` will load all the pretrained weights.
+        tf.initialize_all_variables()
+
         variables_to_restore = tf.contrib.framework.get_variables_to_restore()
             # exclude=['InceptionV3/Logits/final_conv'])
         # print(variables_to_restore) # print the variables to restore
         init_fn = tf.contrib.framework.assign_from_checkpoint_fn(model_path, variables_to_restore)
+        init_var = tf.initialize_all_variables()
 
         # Initialization operation from scratch for the new "fc8" layers
         # `get_variables` will only return the variables whose name starts with the given pattern
         # final_conv_variables = tf.contrib.framework.get_variables('final_conv')
         final_conv_variables = slim.get_variables('InceptionV3/Logits/Conv2d_1c_1x1')
         print(final_conv_variables) # print the variables of final conv
-        # final_conv_init = tf.variables_initializer(final_conv_variables)
+        final_conv_init = tf.variables_initializer(final_conv_variables)
 
         # ---------------------------------------------------------------------
         # Using tf.losses, any loss is added to the tf.GraphKeys.LOSSES collection
@@ -271,11 +280,13 @@ def main(args):
         # First we want to train only the reinitialized last layer fc8 for a few epochs.
         # We run minimize the loss only with respect to the fc8 variables (weight and bias).
         part_optimizer = tf.train.GradientDescentOptimizer(args.learning_rate1)
+        # part_optimizer = tf.train.AdamOptimizer(args.learning_rate1)
         part_train_op = part_optimizer.minimize(loss, var_list=final_conv_variables)
 
         # Then we want to finetune the entire model for a few epochs.
         # We run minimize the loss only with respect to all the variables.
-        full_optimizer = tf.train.GradientDescentOptimizer(args.learning_rate2)
+        # full_optimizer = tf.train.GradientDescentOptimizer(args.learning_rate2)
+        full_optimizer = tf.train.AdamOptimizer(args.learning_rate2)
         full_train_op = full_optimizer.minimize(loss)
 
         # Evaluation metrics
@@ -283,6 +294,8 @@ def main(args):
         correct_prediction = tf.equal(prediction, labels)
         accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
+        saver = tf.train.Saver(write_version=tf.train.SaverDef.V1)
+        # saver = tf.train.import_meta_graph(graph)
         tf.get_default_graph().finalize()
 
     # --------------------------------------------------------------------------
@@ -291,32 +304,42 @@ def main(args):
     # We can call our training operations with `sess.run(train_op)` for instance
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
+    save_mol_dir = 'my_trained_model'
+    check_directories([save_mol_dir])
+
     with tf.Session(graph=graph, config=config) as sess:
         init_fn(sess)  # load the pretrained weights
-        # sess.run(final_conv_init)  # initialize the new fc8 layer
+        sess.run(final_conv_init)  # initialize the new fc8 layer
+        # sess.run(init_var)
 
         train_writer = tf.summary.FileWriter(args.log_dir + '/train', sess.graph)
         test_writer = tf.summary.FileWriter(args.log_dir + '/test')
 
         # Update only the last layer for a few epochs.
         max_step = 0
+        global_step = 0
         for epoch in range(args.num_epochs1):
             # Run an epoch over the training data.
-            print('######### Starting epoch %d / %d' % (epoch + 1, args.num_epochs1))
+            print('######### Starting (part) epoch %d / %d (at %s) #########' % (epoch + 1, args.num_epochs1, time.ctime()))
             # Here we initialize the iterator with the training set.
             # This means that we can go through an entire epoch until the iterator becomes empty.
             sess.run(train_init_op)
 
             step = 0
             while True:
+                step_time = time.time()
                 try:
                     _, lss, summary, cpre = sess.run([part_train_op, loss, merged, correct_prediction], {is_training: True})
                     step += 1
+                    global_step += 1
                     # print(im[0,:10, :10])
                     # print(conv.shape)
                     train_writer.add_summary(summary, step+epoch*max_step)
                     if step % 10 == 0:
-                        print('%d is finished. loss = %.6f; step accuracy = %.2f' % (step, lss, cpre.sum()/cpre.shape[0]))
+                        print('%d is finished. loss = %.6f; step accuracy = %.2f; cost %.3fs.'
+                              % (step, lss, cpre.sum()/cpre.shape[0], time.time()-step_time))
+                        step_time = time.time()
+                        # saver.save(sess, os.path.join(save_mol_dir, "part_icp_%dfea" % args.out_fea), global_step=global_step)
                 except tf.errors.OutOfRangeError:
                     max_step = max(max_step, step)
                     break
