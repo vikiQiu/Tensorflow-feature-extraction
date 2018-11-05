@@ -192,7 +192,7 @@ def main(args):
         train_dataset = train_dataset.map(preprocess_for_train_label, num_parallel_calls=args.num_workers)
         train_dataset = train_dataset.shuffle(buffer_size=10*args.batch_size*args.num_workers)  # don't forget to shuffle
         batched_train_dataset = train_dataset.batch(args.batch_size)
-        batched_train_dataset = batched_train_dataset.prefetch(args.batch_size)
+        batched_train_dataset = batched_train_dataset.prefetch(args.batch_size*10)
 
         # Validation dataset
         val_dataset = tf.data.Dataset.from_tensor_slices((val_filenames, val_labels))
@@ -256,9 +256,9 @@ def main(args):
 
         variables_to_restore = tf.contrib.framework.get_variables_to_restore()
             # exclude=['InceptionV3/Logits/final_conv'])
-        # print(variables_to_restore) # print the variables to restore
+        print(variables_to_restore) # print the variables to restore
         init_fn = tf.contrib.framework.assign_from_checkpoint_fn(model_path, variables_to_restore)
-        init_var = tf.initialize_all_variables()
+        # init_var = tf.initialize_all_variables()
 
         # Initialization operation from scratch for the new "fc8" layers
         # `get_variables` will only return the variables whose name starts with the given pattern
@@ -279,14 +279,15 @@ def main(args):
 
         # First we want to train only the reinitialized last layer fc8 for a few epochs.
         # We run minimize the loss only with respect to the fc8 variables (weight and bias).
-        part_optimizer = tf.train.GradientDescentOptimizer(args.learning_rate1)
-        # part_optimizer = tf.train.AdamOptimizer(args.learning_rate1)
+        # part_optimizer = tf.train.GradientDescentOptimizer(args.learning_rate1)
+        part_optimizer = tf.train.AdamOptimizer(args.learning_rate1)
+        # part_train_op = slim.learning.create_train_op(loss, part_optimizer, variables_to_train=final_conv_variables)
         part_train_op = part_optimizer.minimize(loss, var_list=final_conv_variables)
 
         # Then we want to finetune the entire model for a few epochs.
         # We run minimize the loss only with respect to all the variables.
-        # full_optimizer = tf.train.GradientDescentOptimizer(args.learning_rate2)
-        full_optimizer = tf.train.AdamOptimizer(args.learning_rate2)
+        full_optimizer = tf.train.GradientDescentOptimizer(args.learning_rate2)
+        # full_optimizer = tf.train.AdamOptimizer(args.learning_rate2)
         full_train_op = full_optimizer.minimize(loss)
 
         # Evaluation metrics
@@ -294,9 +295,9 @@ def main(args):
         correct_prediction = tf.equal(prediction, labels)
         accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
-        saver = tf.train.Saver(write_version=tf.train.SaverDef.V1)
+        saver = tf.train.Saver(write_version=tf.train.SaverDef.V2)
         # saver = tf.train.import_meta_graph(graph)
-        tf.get_default_graph().finalize()
+        # tf.get_default_graph().finalize()
 
     # --------------------------------------------------------------------------
     # Now that we have built the graph and finalized it, we define the session.
@@ -311,6 +312,7 @@ def main(args):
         init_fn(sess)  # load the pretrained weights
         sess.run(final_conv_init)  # initialize the new fc8 layer
         # sess.run(init_var)
+        sess.run(tf.variables_initializer(part_optimizer.variables()))
 
         train_writer = tf.summary.FileWriter(args.log_dir + '/train', sess.graph)
         test_writer = tf.summary.FileWriter(args.log_dir + '/test')
@@ -335,11 +337,11 @@ def main(args):
                     # print(im[0,:10, :10])
                     # print(conv.shape)
                     train_writer.add_summary(summary, step+epoch*max_step)
-                    if step % 10 == 0:
+                    if step % 1 == 0:
                         print('%d is finished. loss = %.6f; step accuracy = %.2f; cost %.3fs.'
                               % (step, lss, cpre.sum()/cpre.shape[0], time.time()-step_time))
                         step_time = time.time()
-                        # saver.save(sess, os.path.join(save_mol_dir, "part_icp_%dfea" % args.out_fea), global_step=global_step)
+                        saver.save(sess, os.path.join(save_mol_dir, "part_icp_%dfea" % args.out_fea), global_step=global_step)
                 except tf.errors.OutOfRangeError:
                     max_step = max(max_step, step)
                     break
